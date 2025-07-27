@@ -1,0 +1,107 @@
+name: Test Build
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Test & Build
+        run: |
+          echo "Checking Go modules..."
+          go mod tidy
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "ERROR: go.mod or go.sum needs updating"
+            exit 1
+          fi
+          
+          echo "Running tests..."
+          go test -v -race ./...
+          
+          echo "Building binaries..."
+          platforms=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+          )
+          
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            output="git-status-dash-${GOOS}-${GOARCH}"
+            [ "$GOOS" = "windows" ] && output="${output}.exe"
+            
+            echo "  Building ${platform}..."
+            GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="-s -w" -o "$output" . || exit 1
+            
+            size=$(stat -c%s "$output" 2>/dev/null || stat -f%z "$output")
+            echo "    Size: $((size / 1024)) KB"
+            
+            # Validate binary size
+            if [ "$size" -lt 1000000 ]; then
+              echo "ERROR: Binary for ${platform} is too small (<1MB)!"
+              exit 1
+            fi
+          done
+          
+          echo "All Go builds completed successfully"
+
+  nodejs-test:
+    name: Node.js
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+      
+      - name: Test & Lint
+        run: |
+          echo "Installing dependencies..."
+          yarn install --frozen-lockfile --ignore-scripts
+          
+          echo "Running ESLint..."
+          yarn lint:ci
+          
+          echo "Running tests..."
+          yarn test
+          
+          echo "Node.js checks completed"
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail on security issues
